@@ -1,16 +1,18 @@
 """
 Telegram Media Downloader Bot for Railway
 Bypass content sharing restrictions
+Support: Forward media + Channel links
 """
 
 import os
 import asyncio
 import logging
+import re
 from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
-from pyrogram.enums import ParseMode  # ✅ FIX: Import ParseMode
+from pyrogram.errors import FloodWait, ChannelInvalid, ChannelPrivate, MessageIdInvalid
+from pyrogram.enums import ParseMode
 
 # Setup logging
 logging.basicConfig(
@@ -19,31 +21,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment Variables dari Railway Variables
+# Environment Variables
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-# Validasi ENV
 if not all([API_ID, API_HASH, BOT_TOKEN]):
     logger.error("❌ Environment variables belum di-set!")
     raise ValueError("API_ID, API_HASH, BOT_TOKEN wajib diisi")
 
-# Inisialisasi Client - FIXED
+# Inisialisasi Client
 app = Client(
     "railway_media_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.MARKDOWN,  # ✅ FIX: Enum bukan string
+    parse_mode=ParseMode.MARKDOWN,
     no_updates=False
 )
 
-# In-memory storage (no database)
+# Storage
 user_data = {}
 
+# Regex patterns untuk link
+CHANNEL_LINK_PATTERN = re.compile(r'https?://t\.me/c/(\d+)/(\d+)')
+PUBLIC_LINK_PATTERN = re.compile(r'https?://t\.me/(\w+)/(\d+)')
+
 def get_status(user_id):
-    """Get user status"""
     if user_id not in user_data:
         user_data[user_id] = {
             "downloads": 0,
@@ -55,7 +59,6 @@ def get_status(user_id):
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
-    """Start command"""
     user_id = message.from_user.id
     user_data[user_id] = {
         "downloads": 0,
@@ -71,16 +74,17 @@ async def start_cmd(client, message: Message):
 
 ✨ **Fitur:**
 • Bypass restriction channel
-• Download & re-upload
+• Download dari **forward** atau **link**
 • Support Thread/Album
 • No database
 
 ⚠️ **Cara pakai:**
-1. Forward media dari channel terbatas
-2. Bot akan proses otomatis
-3. Hasil bisa di-share bebas!
+1. **Forward** media dari channel, atau
+2. **Kirim link** (contoh: `https://t.me/c/123/1`)
+3. Bot akan proses otomatis
+4. Hasil bisa di-share bebas!
 
-📊 **Status Anda:** /status
+📊 **Status:** /status
 """
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Status", callback_data="status")],
@@ -90,7 +94,6 @@ async def start_cmd(client, message: Message):
 
 @app.on_message(filters.command("status"))
 async def status_cmd(client, message: Message):
-    """Status command"""
     user_id = message.from_user.id
     data = get_status(user_id)
     
@@ -101,65 +104,46 @@ async def status_cmd(client, message: Message):
 ├ Status: {data['status']}
 └ Last Active: {data['last_seen'].strftime('%H:%M:%S')}
 
-💡 Forward media dari channel untuk memulai!
+💡 Forward media atau kirim link untuk memulai!
 """)
 
 @app.on_message(filters.command("help"))
 async def help_cmd(client, message: Message):
-    """Help command"""
     await message.reply_text("""
 📖 **CARA PENGGUNAAN:**
 
-**1. Single Media:**
-• Forward 1 foto/video/file ke bot
+**1. Via Forward (Rekomendasi):**
+• Forward media dari channel ke bot
 • Tunggu proses download & upload
 • Media baru tanpa restriction
 
-**2. Thread/Album:**
-• Forward album (multiple media) sekaligus
-• Bot akan proses semua (max 10 item)
-• Hasil dikirim sebagai media group
+**2. Via Link:**
+• Kirim link: `https://t.me/c/123456/3` (private)
+• Atau: `https://t.me/channelname/5` (public)
+• Bot akan ambil & upload ulang
 
-**3. Tips:**
-• Bot harus bisa akses channel (public)
+**3. Thread/Album:**
+• Forward album sekaligus
+• Bot proses semua media
+
+⚠️ **Catatan:**
+• Bot harus bisa akses channel
 • Untuk private channel, add bot dulu
-• File max 2GB (Telegram limit)
-
-⚠️ **Disclaimer:** Gunakan untuk konten legal!
+• File max 2GB
 """)
 
 @app.on_callback_query()
 async def callback_handler(client, callback_query):
-    """Handle callbacks"""
     data = callback_query.data
-    user_id = callback_query.from_user.id
     
     if data == "status":
         await callback_query.answer()
-        # Kirim pesan baru bukan edit (hindari error)
         await status_cmd(client, callback_query.message)
     elif data == "help":
         await callback_query.answer()
         await help_cmd(client, callback_query.message)
 
-async def download_with_progress(client, message, progress_msg):
-    """Download media dengan progress"""
-    try:
-        # Download ke folder /tmp (Railway ephemeral storage)
-        download_path = await client.download_media(
-            message,
-            file_name=f"/tmp/dl_{message.id}_",
-            progress=progress_callback,
-            progress_args=(client, progress_msg)
-        )
-        return download_path
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        await progress_msg.edit_text(f"❌ Error download: {str(e)}")
-        return None
-
 async def progress_callback(current, total, client, progress_msg):
-    """Progress callback"""
     if total:
         percent = (current / total) * 100
         try:
@@ -167,116 +151,61 @@ async def progress_callback(current, total, client, progress_msg):
         except:
             pass
 
-@app.on_message(filters.forwarded | filters.media)
-async def media_handler(client, message: Message):
-    """Handle media - inti bypass"""
-    user_id = message.from_user.id
-    
-    # Init user kalau belum ada
-    if user_id not in user_data:
-        user_data[user_id] = {
-            "downloads": 0,
-            "threads": 0,
-            "last_seen": datetime.now(),
-            "status": "idle"
-        }
-    
-    user_data[user_id]["status"] = "processing"
-    user_data[user_id]["last_seen"] = datetime.now()
-    
-    # Progress message
-    progress_msg = await message.reply_text("⏳ Memproses media...")
-    
+async def process_media(client, message, progress_msg, target_msg, user_id):
+    """Proses media (dipakai oleh forward dan link)"""
     try:
         # Cek tipe media
         media_type = None
-        
-        if message.photo:
-            media_type = "photo"
-        elif message.video:
-            media_type = "video"
-        elif message.document:
-            media_type = "document"
-        elif message.audio:
-            media_type = "audio"
-        elif message.voice:
-            media_type = "voice"
-        elif message.video_note:
-            media_type = "video_note"
-        elif message.animation:
-            media_type = "animation"
-        elif message.sticker:
-            media_type = "sticker"
+        if target_msg.photo: media_type = "photo"
+        elif target_msg.video: media_type = "video"
+        elif target_msg.document: media_type = "document"
+        elif target_msg.audio: media_type = "audio"
+        elif target_msg.voice: media_type = "voice"
+        elif target_msg.video_note: media_type = "video_note"
+        elif target_msg.animation: media_type = "animation"
+        elif target_msg.sticker: media_type = "sticker"
         
         if not media_type:
-            await progress_msg.edit_text("❌ Tidak ada media yang ditemukan")
+            await progress_msg.edit_text("❌ Tidak ada media")
             return
         
         # Download
         await progress_msg.edit_text("⏳ Mendownload...")
-        file_path = await download_with_progress(client, message, progress_msg)
+        file_path = await client.download_media(
+            target_msg,
+            file_name=f"/tmp/dl_{user_id}_{target_msg.id}_",
+            progress=progress_callback,
+            progress_args=(client, progress_msg)
+        )
         
         if not file_path:
+            await progress_msg.edit_text("❌ Gagal download")
             return
         
-        # Upload ulang (bypass restriction)
+        # Upload
         await progress_msg.edit_text("📤 Mengupload ulang...")
         
-        caption = message.caption or ""
+        caption = target_msg.caption or ""
         footer = f"\n\n📥 Unlocked via Bot | {datetime.now().strftime('%Y-%m-%d')}"
         new_caption = caption + footer if caption else footer.strip()
         
         # Send berdasarkan tipe
         if media_type == "photo":
-            await client.send_photo(
-                message.chat.id,
-                photo=file_path,
-                caption=new_caption
-            )
+            await client.send_photo(message.chat.id, file_path, caption=new_caption)
         elif media_type == "video":
-            await client.send_video(
-                message.chat.id,
-                video=file_path,
-                caption=new_caption,
-                supports_streaming=True
-            )
+            await client.send_video(message.chat.id, file_path, caption=new_caption, supports_streaming=True)
         elif media_type == "document":
-            await client.send_document(
-                message.chat.id,
-                document=file_path,
-                caption=new_caption
-            )
+            await client.send_document(message.chat.id, file_path, caption=new_caption)
         elif media_type == "audio":
-            await client.send_audio(
-                message.chat.id,
-                audio=file_path,
-                caption=new_caption
-            )
+            await client.send_audio(message.chat.id, file_path, caption=new_caption)
         elif media_type == "voice":
-            await client.send_voice(
-                message.chat.id,
-                voice=file_path
-            )
+            await client.send_voice(message.chat.id, voice=file_path)
         elif media_type == "video_note":
-            await client.send_video_note(
-                message.chat.id,
-                video_note=file_path
-            )
+            await client.send_video_note(message.chat.id, video_note=file_path)
         elif media_type == "animation":
-            await client.send_animation(
-                message.chat.id,
-                animation=file_path,
-                caption=new_caption
-            )
+            await client.send_animation(message.chat.id, animation=file_path, caption=new_caption)
         elif media_type == "sticker":
-            await client.send_sticker(
-                message.chat.id,
-                sticker=file_path
-            )
-        
-        # Update stats
-        user_data[user_id]["downloads"] += 1
-        user_data[user_id]["status"] = "idle"
+            await client.send_sticker(message.chat.id, sticker=file_path)
         
         # Cleanup
         try:
@@ -284,28 +213,107 @@ async def media_handler(client, message: Message):
         except:
             pass
         
+        user_data[user_id]["downloads"] += 1
+        user_data[user_id]["status"] = "idle"
+        
         await progress_msg.edit_text("✅ **Berhasil!** Media sudah bisa di-share.")
         
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        await progress_msg.edit_text("⏳ Rate limit, mencoba lagi...")
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Process error: {e}")
         await progress_msg.edit_text(f"❌ Error: {str(e)}")
         user_data[user_id]["status"] = "error"
 
+@app.on_message(filters.forwarded | filters.media)
+async def media_handler(client, message: Message):
+    """Handle forward/media"""
+    user_id = message.from_user.id
+    
+    if user_id not in user_data:
+        user_data[user_id] = {"downloads": 0, "threads": 0, "last_seen": datetime.now(), "status": "idle"}
+    
+    user_data[user_id]["status"] = "processing"
+    progress_msg = await message.reply_text("⏳ Memproses media...")
+    
+    await process_media(client, message, progress_msg, message, user_id)
+
 @app.on_message(filters.text & filters.private)
 async def text_handler(client, message: Message):
-    """Handle text non-command"""
-    if not message.text.startswith('/'):
+    """Handle text - cek link atau command"""
+    text = message.text.strip()
+    user_id = message.from_user.id
+    
+    # Cek link private channel
+    private_match = CHANNEL_LINK_PATTERN.match(text)
+    if private_match:
+        channel_id = int(private_match.group(1))
+        msg_id = int(private_match.group(2))
+        
+        if user_id not in user_data:
+            user_data[user_id] = {"downloads": 0, "threads": 0, "last_seen": datetime.now(), "status": "idle"}
+        
+        progress_msg = await message.reply_text("⏳ Mengambil dari link channel...")
+        user_data[user_id]["status"] = "fetching"
+        
+        try:
+            # Format channel ID untuk private (-100 prefix)
+            chat_id = f"-100{channel_id}"
+            target_msg = await client.get_messages(chat_id, msg_id)
+            
+            if not target_msg or not target_msg.media:
+                await progress_msg.edit_text("❌ Pesan tidak ditemukan atau tidak ada media")
+                return
+            
+            await process_media(client, message, progress_msg, target_msg, user_id)
+            
+        except ChannelPrivate:
+            await progress_msg.edit_text("""
+❌ **Channel Private / Bot Tidak Punya Akses**
+
+**Solusi:**
+1. Add bot ke channel sebagai member/admin
+2. Atau forward media langsung (bukan link)
+""")
+        except Exception as e:
+            await progress_msg.edit_text(f"❌ Error: {str(e)}")
+        return
+    
+    # Cek link public
+    public_match = PUBLIC_LINK_PATTERN.match(text)
+    if public_match:
+        username = public_match.group(1)
+        msg_id = int(public_match.group(2))
+        
+        if user_id not in user_data:
+            user_data[user_id] = {"downloads": 0, "threads": 0, "last_seen": datetime.now(), "status": "idle"}
+        
+        progress_msg = await message.reply_text("⏳ Mengambil dari link...")
+        user_data[user_id]["status"] = "fetching"
+        
+        try:
+            chat_id = f"@{username}"
+            target_msg = await client.get_messages(chat_id, msg_id)
+            
+            if not target_msg or not target_msg.media:
+                await progress_msg.edit_text("❌ Pesan tidak ditemukan atau tidak ada media")
+                return
+            
+            await process_media(client, message, progress_msg, target_msg, user_id)
+            
+        except Exception as e:
+            await progress_msg.edit_text(f"❌ Error: {str(e)}")
+        return
+    
+    # Bukan link, bukan command
+    if not text.startswith('/'):
         await message.reply_text("""
-ℹ️ Kirimkan **media** atau **forward** dari channel terbatas.
+ℹ️ **Kirimkan:**
+• **Forward media** dari channel, atau  
+• **Link channel** (contoh: `https://t.me/c/123456/3`)
 
 📌 Command: /start | /status | /help
 """)
 
 def main():
-    """Main"""
     logger.info("🚂 Starting Railway Bot...")
     app.run()
 
