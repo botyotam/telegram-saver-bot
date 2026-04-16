@@ -10,6 +10,7 @@ from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait
+from pyrogram.enums import ParseMode  # ✅ FIX: Import ParseMode
 
 # Setup logging
 logging.basicConfig(
@@ -28,14 +29,14 @@ if not all([API_ID, API_HASH, BOT_TOKEN]):
     logger.error("❌ Environment variables belum di-set!")
     raise ValueError("API_ID, API_HASH, BOT_TOKEN wajib diisi")
 
-# Inisialisasi Client
+# Inisialisasi Client - FIXED
 app = Client(
     "railway_media_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode="markdown",
-    no_updates=False  # Penting untuk Railway
+    parse_mode=ParseMode.MARKDOWN,  # ✅ FIX: Enum bukan string
+    no_updates=False
 )
 
 # In-memory storage (no database)
@@ -135,6 +136,7 @@ async def callback_handler(client, callback_query):
     
     if data == "status":
         await callback_query.answer()
+        # Kirim pesan baru bukan edit (hindari error)
         await status_cmd(client, callback_query.message)
     elif data == "help":
         await callback_query.answer()
@@ -169,6 +171,16 @@ async def progress_callback(current, total, client, progress_msg):
 async def media_handler(client, message: Message):
     """Handle media - inti bypass"""
     user_id = message.from_user.id
+    
+    # Init user kalau belum ada
+    if user_id not in user_data:
+        user_data[user_id] = {
+            "downloads": 0,
+            "threads": 0,
+            "last_seen": datetime.now(),
+            "status": "idle"
+        }
+    
     user_data[user_id]["status"] = "processing"
     user_data[user_id]["last_seen"] = datetime.now()
     
@@ -178,7 +190,6 @@ async def media_handler(client, message: Message):
     try:
         # Cek tipe media
         media_type = None
-        file_path = None
         
         if message.photo:
             media_type = "photo"
@@ -282,59 +293,6 @@ async def media_handler(client, message: Message):
         logger.error(f"Error: {e}")
         await progress_msg.edit_text(f"❌ Error: {str(e)}")
         user_data[user_id]["status"] = "error"
-
-# Thread handling sederhana
-thread_buffer = {}
-
-@app.on_message(filters.media & ~filters.forwarded)
-async def thread_handler(client, message: Message):
-    """Handle media group (thread/album)"""
-    if message.media_group_id:
-        group_id = message.media_group_id
-        
-        if group_id not in thread_buffer:
-            thread_buffer[group_id] = []
-            # Tunggu 2 detik untuk kumpulkan semua
-            await asyncio.sleep(2)
-        
-        thread_buffer[group_id].append(message)
-        
-        # Proses jika ini pesan terakhir (heuristic)
-        if len(thread_buffer[group_id]) >= 2:  # Minimal 2 untuk thread
-            await process_thread(client, group_id)
-
-async def process_thread(client, group_id):
-    """Process thread media"""
-    messages = thread_buffer.get(group_id, [])
-    if not messages:
-        return
-    
-    user_id = messages[0].from_user.id
-    status_msg = await messages[0].reply_text(f"🧵 Thread: {len(messages)} items")
-    
-    success = 0
-    for msg in messages:
-        try:
-            file_path = await client.download_media(msg, file_name=f"/tmp/thread_{msg.id}_")
-            if file_path:
-                caption = msg.caption or ""
-                footer = f"\n📥 Thread {success+1}/{len(messages)}"
-                
-                if msg.photo:
-                    await client.send_photo(msg.chat.id, file_path, caption=caption+footer)
-                elif msg.video:
-                    await client.send_video(msg.chat.id, file_path, caption=caption+footer)
-                
-                os.remove(file_path)
-                success += 1
-                await asyncio.sleep(0.5)  # Rate limit
-        except Exception as e:
-            logger.error(f"Thread error: {e}")
-    
-    user_data[user_id]["threads"] += 1
-    await status_msg.edit_text(f"✅ Thread selesai: {success}/{len(messages)} berhasil")
-    
-    del thread_buffer[group_id]
 
 @app.on_message(filters.text & filters.private)
 async def text_handler(client, message: Message):
